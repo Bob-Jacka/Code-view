@@ -1,7 +1,6 @@
 #ifndef CODE_INSPECTOR_INTERFACE_HPP
 #define CODE_INSPECTOR_INTERFACE_HPP
 
-#include <QWindow>
 #include <QLabel>
 #include <QApplication>
 #include <QWidget>
@@ -15,11 +14,15 @@
 #include <QFileDialog>
 #include <tuple>
 #include <fstream>
+#include <cstdlib>
+#include <iostream>
+#include <future>
 
 #define UI_MSG(Window_name, Window_txt) \
 QMessageBox(QMessageBox::Icon::Warning, Window_name, Window_txt).exec(); \
 return;                                 \
 
+#define FAVOURITE_COMPILER "g++"
 #define WINDOW_HEIGHT 580
 #define WINDOW_WIDHT 970
 
@@ -51,8 +54,90 @@ static std::vector<std::string> read_file(const std::string &fileName) {
     return {};
 }
 
+//Command to execute by your system
+struct Command_builder {
+private:
+    std::string compiler;
+    std::string output_filename;
+    std::string input_filename;
+    std::string flag;
+
+    //output command
+    std::string command;
+public:
+    Command_builder &with_compiler(const std::string &new_compiler) {
+        compiler = new_compiler;
+        return *this;
+    }
+
+    Command_builder &with_input_filename(const std::string &new_input_filename) {
+        input_filename = new_input_filename;
+        return *this;
+    }
+
+    Command_builder &with_output_filename(const std::string &new_output_filename) {
+        output_filename = new_output_filename;
+        return *this;
+    }
+
+    Command_builder &with_flag(const std::string &new_flag_val) {
+        flag = new_flag_val + " -std=c++20";
+        return *this;
+    }
+
+    [[nodiscard]] std::string build() {
+        command += compiler;
+        command += flag;
+        command += input_filename;
+        command += output_filename;
+        return command;
+    }
+};
+
+enum class Compile_state : short {
+    PREPROCESS = 0,
+    ASSEMBLY = 1,
+    OBJECT = 2
+};
+
+struct Results_win {
+private:
+    QDialog *preprocessed_win;
+    QTextEdit *preproc_txt_edit;
+public:
+    ~Results_win() {
+        delete preprocessed_win;
+        delete preproc_txt_edit;
+    };
+
+    Results_win() {
+        preprocessed_win = new QDialog();
+        preproc_txt_edit = new QTextEdit(preprocessed_win);
+    };
+
+    void create_win() {
+        preprocessed_win->setFixedSize(WINDOW_WIDHT, WINDOW_HEIGHT);
+        preprocessed_win->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
+        preproc_txt_edit->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
+
+        preprocessed_win->show();
+    }
+
+    QTextEdit *handle_txt_edit() {
+        return preproc_txt_edit;
+    }
+};
+
 class MainWindow : public QMainWindow {
 Q_OBJECT
+
+private:
+    QString input_filename;
+
+    Results_win *compile_res_win;
+
+    Compile_state state;
+
 protected:
     void keyPressEvent(QKeyEvent *event) override {
         if (event->key() == Qt::Key_O && event->modifiers().testAnyFlags(Qt::ControlModifier)) [[likely]] {
@@ -61,6 +146,8 @@ protected:
                 if (filename.isEmpty()) {
                     UI_MSG("Error", "Filename is empty")
                 }
+                compile_res_win = new Results_win();
+                input_filename = filename;
 
                 tx_edit->setReadOnly(false); //unlock text edit
                 QTextCursor cursor(tx_edit->textCursor());
@@ -79,36 +166,58 @@ protected:
         }
         //Page handlers:
         if (event->key() == Qt::Key_E && event->modifiers().testAnyFlags(Qt::ShiftModifier)) [[likely]] {
-            open_preprocessed();
+            state = Compile_state::PREPROCESS;
+            onCompile();
         } else if (event->key() == Qt::Key_S && event->modifiers().testAnyFlags(Qt::ShiftModifier)) [[likely]] {
-            open_assembly();
+            state = Compile_state::ASSEMBLY;
+            onCompile();
         } else if (event->key() == Qt::Key_C && not event->modifiers().testAnyFlags(Qt::ShiftModifier)) {
-            open_object();
+            state = Compile_state::OBJECT;
+            onCompile();
         }
     }
-//slots
-public slots:
+//private slots functionality
+private slots:
 
-    void open_assembly() {
-        auto *assembly_win = new QWindow();
-        assembly_win->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
-        assembly_win->setTitle("Here is assembly code");
-        assembly_win->show();
-    };
+    void onCompilationFinished(const QString &filename) {
+        QFile file(filename);
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream in(&file);
+            compile_res_win->handle_txt_edit()->setPlainText(in.readAll());
+            file.close();
+        } else {
+            UI_MSG("Error", "Cannot open file for read")
+        }
+    }
 
-    void open_preprocessed() {
-        auto *preprocessed_win = new QWindow();
-        preprocessed_win->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
-        preprocessed_win->setTitle("Here is preprocessed code");
-        preprocessed_win->show();
-    };
+    void onCompilationError(const QString &error) {
+        UI_MSG("Error", "Compilation error: " + error)
+    }
 
-    void open_object() {
-        auto *object_win = new QWindow();
-        object_win->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
-        object_win->setTitle("Here is object code");
-        object_win->show();
-    };
+    void onCompile() {
+        compile_res_win->handle_txt_edit()->setPlainText("Compilation in progress");
+
+        auto res = std::async(std::launch::async, [this]() {
+            try {
+                QString filename = "output.i";
+                QFile file(filename);
+                if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                    UI_MSG("Error", "Cannot open file for write")
+                }
+                file.close();
+
+                emit compilationFinished(filename);
+            } catch (const std::exception &e) {
+                emit compilationError(e.what());
+            }
+        });
+    }
+
+signals:
+
+    void compilationFinished(const QString &);
+
+    void compilationError(const QString &);
 
 public:
     QTextEdit *tx_edit;
@@ -126,7 +235,7 @@ public:
         this->setFixedSize(WINDOW_WIDHT, WINDOW_HEIGHT); //do not resize window
 
         label_1 = new QLabel(
-                "Press keyboard buttons:\n 1. E - preprocessed \n 2. Shift+S - assembly \n 3. Shift+c - object",
+                "Press keyboard buttons:\n 1. Shift+E - preprocessed \n 2. Shift+S - assembly \n 3. 'c' - object \n\n Ctrl+O - open file",
                 this);
         label_1->setGeometry(QRect(WINDOW_WIDHT - 150, 0, 150, WINDOW_HEIGHT));
         label_1->move(QPoint(WINDOW_WIDHT - 150, 0));
