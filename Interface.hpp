@@ -18,15 +18,19 @@
 #include <iostream>
 #include <future>
 
-#define UI_MSG(Window_name, Window_txt) \
-QMessageBox(QMessageBox::Icon::Warning, Window_name, Window_txt).exec(); \
-return;                                 \
-
+//Program settings:
 #define FAVOURITE_COMPILER "g++"
+#define OUTPUT_FILENAME "output"
+
+//Window settings:
 #define WINDOW_HEIGHT 580
 #define WINDOW_WIDHT 970
 
 QT_BEGIN_NAMESPACE
+
+#define UI_MSG(Window_name, Window_txt) \
+QMessageBox(QMessageBox::Icon::Warning, Window_name, Window_txt).exec(); \
+return;
 
 /**
  * Read file line by line.
@@ -54,6 +58,12 @@ static std::vector<std::string> read_file(const std::string &fileName) {
     return {};
 }
 
+enum class Compile_state : short {
+    PREPROCESS = 0,
+    ASSEMBLY = 1,
+    OBJECT = 2
+};
+
 //Command to execute by your system
 struct Command_builder {
 private:
@@ -61,10 +71,25 @@ private:
     std::string output_filename;
     std::string input_filename;
     std::string flag;
+    Compile_state state;
 
     //output command
     std::string command;
+
 public:
+    Command_builder() = default;
+
+    ~Command_builder() = default;
+
+    [[nodiscard]] std::string get_output_name() {
+        return output_filename;
+    }
+
+    Command_builder &with_compile_stage(Compile_state new_state) {
+        state = new_state;
+        return *this;
+    }
+
     Command_builder &with_compiler(const std::string &new_compiler) {
         compiler = new_compiler;
         return *this;
@@ -76,28 +101,51 @@ public:
     }
 
     Command_builder &with_output_filename(const std::string &new_output_filename) {
-        output_filename = new_output_filename;
+        std::string file_ext;
+        if (!new_output_filename.contains('.')) {
+            switch (state) {
+                case Compile_state::PREPROCESS:
+                    file_ext += ".i";
+                    break;
+                case Compile_state::ASSEMBLY:
+                    file_ext += ".asm";
+                    break;
+                case Compile_state::OBJECT:
+                    file_ext += ".o";
+                    break;
+            }
+        }
+        output_filename = new_output_filename + file_ext;
         return *this;
     }
 
-    Command_builder &with_flag(const std::string &new_flag_val) {
-        flag = new_flag_val + " -std=c++20";
+    Command_builder &with_flags(std::initializer_list<std::string> strings) {
+        std::string result;
+        switch (state) {
+            [[likely]] case Compile_state::PREPROCESS:
+                result += "-E ";
+                break;
+            case Compile_state::ASSEMBLY:
+                result += "-S ";
+                break;
+            case Compile_state::OBJECT:
+                result += "-c ";
+                break;
+        }
+        for (const auto &str: strings) {
+            result += str + " ";
+        }
+        flag = result;
         return *this;
     }
 
     [[nodiscard]] std::string build() {
-        command += compiler;
-        command += flag;
-        command += input_filename;
-        command += output_filename;
+        command += compiler + " ";
+        command += flag + " ";
+        command += input_filename + " ";
+        command += "-o " + output_filename;
         return command;
     }
-};
-
-enum class Compile_state : short {
-    PREPROCESS = 0,
-    ASSEMBLY = 1,
-    OBJECT = 2
 };
 
 struct Results_win {
@@ -115,7 +163,11 @@ public:
         preproc_txt_edit = new QTextEdit(preprocessed_win);
     };
 
-    void create_win() {
+    void set_visible(bool visible_state) {
+        preprocessed_win->setVisible(visible_state);
+    }
+
+    void show_win() {
         preprocessed_win->setFixedSize(WINDOW_WIDHT, WINDOW_HEIGHT);
         preprocessed_win->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
         preproc_txt_edit->resize(WINDOW_WIDHT, WINDOW_HEIGHT);
@@ -136,7 +188,7 @@ private:
 
     Results_win *compile_res_win;
 
-    Compile_state state;
+    Compile_state compile_state;
 
 protected:
     void keyPressEvent(QKeyEvent *event) override {
@@ -147,6 +199,7 @@ protected:
                     UI_MSG("Error", "Filename is empty")
                 }
                 compile_res_win = new Results_win();
+                compile_res_win->set_visible(false);
                 input_filename = filename;
 
                 tx_edit->setReadOnly(false); //unlock text edit
@@ -164,53 +217,61 @@ protected:
                 UI_MSG("Error", "Extensions are not supported")
             }
         }
+
         //Page handlers:
         if (event->key() == Qt::Key_E && event->modifiers().testAnyFlags(Qt::ShiftModifier)) [[likely]] {
-            state = Compile_state::PREPROCESS;
+            compile_state = Compile_state::PREPROCESS;
             onCompile();
         } else if (event->key() == Qt::Key_S && event->modifiers().testAnyFlags(Qt::ShiftModifier)) [[likely]] {
-            state = Compile_state::ASSEMBLY;
+            compile_state = Compile_state::ASSEMBLY;
             onCompile();
         } else if (event->key() == Qt::Key_C && not event->modifiers().testAnyFlags(Qt::ShiftModifier)) {
-            state = Compile_state::OBJECT;
+            compile_state = Compile_state::OBJECT;
             onCompile();
         }
     }
 //private slots functionality
 private slots:
 
-    void onCompilationFinished(const QString &filename) {
-        QFile file(filename);
+    void onCompilationFinished(const QString &output_filename) {
+        QFile file(output_filename);
         if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
             QTextStream in(&file);
             compile_res_win->handle_txt_edit()->setPlainText(in.readAll());
             file.close();
         } else {
-            UI_MSG("Error", "Cannot open file for read")
+            UI_MSG("Error", "Cannot open file for read: " + output_filename)
         }
     }
 
-    void onCompilationError(const QString &error) {
-        UI_MSG("Error", "Compilation error: " + error)
+    void onCompilationError() {
+        UI_MSG("Error", "Compilation error occurred")
     }
 
     void onCompile() {
+        compile_res_win->set_visible(true);
+        compile_res_win->handle_txt_edit()->setReadOnly(true);
         compile_res_win->handle_txt_edit()->setPlainText("Compilation in progress");
+        compile_res_win->show_win();
 
-        auto res = std::async(std::launch::async, [this]() {
+        auto res = std::async(std::launch::async, [this]() -> void {
             try {
-                QString filename = "output.i";
-                QFile file(filename);
-                if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                    UI_MSG("Error", "Cannot open file for write")
-                }
-                file.close();
+                auto command = Command_builder()
+                        .with_compiler(FAVOURITE_COMPILER)
+                        .with_compile_stage(compile_state)
+                        .with_flags({"-std=c++23"})
+                        .with_input_filename(input_filename.toStdString())
+                        .with_output_filename(OUTPUT_FILENAME);
 
-                emit compilationFinished(filename);
+                auto build_command = command.build();
+
+                std::system(build_command.c_str()); //compile given file
+                emit compilationFinished(QString(command.get_output_name().c_str()));
             } catch (const std::exception &e) {
                 emit compilationError(e.what());
             }
         });
+        res.get();
     }
 
 signals:
@@ -258,6 +319,26 @@ public:
 
     void translate_Ui(QMainWindow *MainWindow) const {
         MainWindow->setWindowTitle(QCoreApplication::translate("MainWindow", "Code inspector", nullptr));
+    }
+
+    ~MainWindow() = default;
+
+    MainWindow() {
+        QObject::connect(
+                this,
+                &MainWindow::compilationFinished,
+                this,
+                &MainWindow::onCompilationFinished,
+                Qt::AutoConnection
+        );
+
+        QObject::connect(
+                this,
+                &MainWindow::compilationError,
+                this,
+                &MainWindow::onCompilationError,
+                Qt::AutoConnection
+        );
     }
 };
 
